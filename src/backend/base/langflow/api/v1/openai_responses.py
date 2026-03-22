@@ -161,7 +161,7 @@ async def run_flow_for_openai_responses(
 
                                 # Handle add_message events
                                 if event_type == "token":
-                                    token_data = data.get("chunk", "")
+                                    token_data = data if isinstance(data, dict) else {"chunk": data}
                                     await logger.adebug(
                                         "[OpenAIResponses][stream] token: token_data=%s",
                                         token_data,
@@ -376,23 +376,39 @@ async def run_flow_for_openai_responses(
                             await logger.adebug("[OpenAIResponses][stream] failed to decode event bytes; skipping")
                             continue
 
-                    # Only send chunks with actual content
-                    if content or token_data:
-                        if isinstance(token_data, str):
-                            content = token_data
-                            await logger.adebug(
-                                f"[OpenAIResponses][stream] sent chunk with content={content}",
-                            )
+                    chunk_delta = {}
+                    if isinstance(token_data, str):
+                        if token_data:
+                            chunk_delta["content"] = token_data
+                    elif isinstance(token_data, dict):
+                        token_content = token_data.get("chunk", "")
+                        token_reasoning = (
+                            token_data.get("reasoning_content")
+                            or token_data.get("thinking")
+                            or token_data.get("reasoning")
+                            or ""
+                        )
+                        if isinstance(token_content, str) and token_content:
+                            chunk_delta["content"] = token_content
+                        if isinstance(token_reasoning, str) and token_reasoning:
+                            chunk_delta["reasoning_content"] = token_reasoning
+
+                    if content:
+                        chunk_delta.setdefault("content", content)
+
+                    if chunk_delta:
                         chunk = OpenAIResponsesStreamChunk(
                             id=response_id,
                             created=created_timestamp,
                             model=request.model,
-                            delta={"content": content},
+                            delta=chunk_delta,
                         )
                         yield f"data: {chunk.model_dump_json()}\n\n"
                         await logger.adebug(
-                            "[OpenAIResponses][stream] sent chunk with delta_len=%d",
-                            len(content),
+                            "[OpenAIResponses][stream] sent chunk with delta_keys=%s content_len=%d reasoning_len=%d",
+                            sorted(chunk_delta.keys()),
+                            len(chunk_delta.get("content", "")),
+                            len(chunk_delta.get("reasoning_content", "")),
                         )
 
                 # Send final completion chunk

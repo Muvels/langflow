@@ -1002,3 +1002,49 @@ async def test_agent_streaming_preserves_message_id():
     assert token_events[1]["id"] == "test-persisted-id"
     assert result.properties.state == "complete"
     assert result.text == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_agent_streaming_emits_reasoning_token_events():
+    """Test that reasoning payloads are forwarded during streaming."""
+    token_events = []
+
+    async def mock_send_message(message):
+        return message
+
+    def mock_token_callback(data):
+        token_events.append(data)
+
+    agent_message = Message(
+        sender=MESSAGE_SENDER_AI,
+        sender_name="Agent",
+        properties={"icon": "Bot", "state": "partial"},
+        content_blocks=[ContentBlock(title="Agent Steps", contents=[])],
+        session_id="test_session_id",
+    )
+    agent_message.data["id"] = "test-message-id-3"
+
+    events = [
+        {
+            "event": "on_chain_stream",
+            "data": {"chunk": AIMessageChunk(content="", additional_kwargs={"reasoning_content": "Thinking step"})},
+        },
+        {
+            "event": "on_chain_stream",
+            "data": {"chunk": AIMessageChunk(content="Final answer")},
+        },
+        {
+            "event": "on_chain_end",
+            "data": {"output": AgentFinish(return_values={"output": "Final answer"}, log="complete")},
+        },
+    ]
+
+    result = await process_agent_events(create_event_iterator(events), agent_message, mock_send_message, mock_token_callback)
+
+    assert len(token_events) == 2
+    assert token_events[0]["id"] == "test-message-id-3"
+    assert token_events[0]["reasoning_content"] == "Thinking step"
+    assert "chunk" not in token_events[0]
+    assert token_events[1]["chunk"] == "Final answer"
+    assert result.properties.state == "complete"
+    assert result.text == "Final answer"

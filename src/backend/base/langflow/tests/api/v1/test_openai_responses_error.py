@@ -96,3 +96,67 @@ async def test_openai_response_stream_error_handling(client):
 
     # Clean up overrides
     client.app.dependency_overrides = {}
+
+
+@pytest.mark.asyncio
+async def test_openai_response_stream_emits_reasoning_chunks(client):
+    """Test that reasoning payloads are preserved in streaming response chunks."""
+    from langflow.services.auth.utils import api_key_security
+    from langflow.services.database.models.user.model import UserRead
+
+    async def mock_api_key_security():
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        return UserRead(
+            id="00000000-0000-0000-0000-000000000000",
+            username="testuser",
+            is_active=True,
+            is_superuser=False,
+            create_at=now,
+            updated_at=now,
+            profile_image=None,
+            store_api_key=None,
+            last_login_at=None,
+            optins=None,
+        )
+
+    client.app.dependency_overrides[api_key_security] = mock_api_key_security
+
+    with (
+        patch("langflow.api.v1.openai_responses.get_flow_by_id_or_endpoint_name") as mock_get_flow,
+        patch("langflow.api.v1.openai_responses.run_flow_generator") as mock_run_flow,
+        patch("langflow.api.v1.openai_responses.consume_and_yield") as mock_consume,
+    ):
+        mock_flow = MagicMock()
+        mock_flow.data = {"nodes": [{"data": {"type": "ChatInput"}}, {"data": {"type": "ChatOutput"}}]}
+        mock_get_flow.return_value = mock_flow
+        mock_run_flow.return_value = None
+
+        token_event = json.dumps(
+            {
+                "event": "token",
+                "data": {"chunk": "Answer token", "reasoning_content": "Reasoning token"},
+            }
+        ).encode("utf-8")
+
+        async def event_generator(*_, **__):
+            yield token_event
+            yield None
+
+        mock_consume.side_effect = event_generator
+
+        response = client.post(
+            "/api/v1/responses",
+            json={"model": "test-flow-id", "input": "test input", "stream": True},
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+        assert response.status_code == 200
+        blocks = [block for block in response.content.decode("utf-8").split("\n\n") if block.startswith("data: ")]
+        chunks = [json.loads(block.removeprefix("data: ")) for block in blocks if block != "data: [DONE]"]
+
+        assert any(chunk.get("delta", {}).get("reasoning_content") == "Reasoning token" for chunk in chunks)
+        assert any(chunk.get("delta", {}).get("content") == "Answer token" for chunk in chunks)
+
+    client.app.dependency_overrides = {}

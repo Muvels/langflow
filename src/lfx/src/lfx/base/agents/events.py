@@ -53,6 +53,25 @@ def _calculate_duration(start_time: float) -> int:
     return result
 
 
+def _extract_reasoning_text(data_chunk: AIMessageChunk) -> str:
+    """Extract provider-specific reasoning text from a streaming chunk."""
+    additional_kwargs = getattr(data_chunk, "additional_kwargs", {})
+    if isinstance(additional_kwargs, dict):
+        for key in ("reasoning_content", "thinking", "reasoning"):
+            value = additional_kwargs.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    response_metadata = getattr(data_chunk, "response_metadata", {})
+    if isinstance(response_metadata, dict):
+        for key in ("reasoning_content", "thinking", "reasoning"):
+            value = response_metadata.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    return ""
+
+
 async def handle_on_chain_start(
     event: dict[str, Any],
     agent_message: Message,
@@ -312,19 +331,19 @@ async def handle_on_chain_stream(
         start_time = perf_counter()
     elif isinstance(data_chunk, AIMessageChunk):
         output_text = _extract_output_text(data_chunk.content)
+        reasoning_text = _extract_reasoning_text(data_chunk)
         # For streaming, send token event if callback is available
         # Note: we should expect the callback, but we keep it optional for backwards compatibility
         # as of v1.6.5
-        if output_text is not None and output_text != "" and send_token_callback and message_id:
-            await asyncio.to_thread(
-                send_token_callback,
-                data={
-                    "chunk": output_text,
-                    "id": str(message_id),
-                },
-            )
+        if send_token_callback and message_id and ((output_text is not None and output_text != "") or reasoning_text):
+            payload = {"id": str(message_id)}
+            if output_text is not None and output_text != "":
+                payload["chunk"] = output_text
+            if reasoning_text:
+                payload["reasoning_content"] = reasoning_text
+            await asyncio.to_thread(send_token_callback, data=payload)
 
-        if not agent_message.text:
+        if not agent_message.text and ((output_text is not None and output_text != "") or reasoning_text):
             # Starts the timer when the first message is starting to be generated
             start_time = perf_counter()
     return agent_message, start_time
